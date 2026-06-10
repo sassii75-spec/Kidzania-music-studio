@@ -389,7 +389,7 @@ export default function KidPortal() {
                     {lang === "KOR" ? "어린이 나이" : "Child Age"}
                   </label>
                   <div className="grid grid-cols-5 gap-2">
-                    {[6, 7, 8, 9, 10].map((age) => (
+                    {[6, 7, 8, 9, 10, 11, 12, 13, 14, 15].map((age) => (
                       <button
                         type="button"
                         key={age}
@@ -1182,6 +1182,9 @@ export default function KidPortal() {
 
       {/* Footer */}
       <footer className="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-5 text-center text-[9px] text-slate-500 border-t border-slate-200 mt-10">
+        <p className="max-w-md mx-auto leading-normal mb-1">
+          본 웹 서비스는 키자니아(KidZania)와 함께하는 '대중음악프로듀서' 체험용 사이트입니다.
+        </p>
         <p>© 2026 KidZania Pop Music Studio. All rights reserved.</p>
       </footer>
     </div>

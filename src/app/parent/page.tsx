@@ -873,7 +873,10 @@ export default function ParentPortal() {
       </main>
 
       {/* Footer */}
-      <footer className="no-print w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-5 text-center text-[9px] text-slate-505 border-t border-slate-205 mt-10">
+      <footer className="no-print w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-5 text-center text-[9px] text-slate-500 border-t border-slate-200 mt-10">
+        <p className="max-w-md mx-auto leading-normal mb-1">
+          본 웹 서비스는 키자니아(KidZania)와 함께하는 '대중음악프로듀서' 체험용 사이트입니다.
+        </p>
         <p>© 2026 KidZania Pop Music Studio. All rights reserved.</p>
       </footer>
     </div>

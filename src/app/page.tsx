@@ -330,7 +330,7 @@ export default function LandingPage() {
       {/* Main Footer */}
       <footer className="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 text-center text-[10px] text-slate-500 border-t border-slate-200 z-10 mt-10">
         <p className="max-w-md mx-auto leading-normal">
-          본 웹 서비스는 어린이 직업체험 브랜드 키자니아(KidZania) 서울/부산의 '대중음악가' 연구원 체험용 하이브리드 포털 시뮬레이터입니다.<br />
+          본 웹 서비스는 키자니아(KidZania)와 함께하는 '대중음악프로듀서' 체험용 사이트입니다.<br />
           © 2026 KidZania Pop Music Studio. All rights reserved.
         </p>
       </footer>
