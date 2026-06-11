@@ -1,5 +1,5 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
-import { getFirestore, Firestore } from "firebase/firestore";
+import { initializeFirestore, Firestore } from "firebase/firestore";
 
 let db: Firestore | null = null;
 
@@ -18,8 +18,10 @@ const isFirebaseConfigured = !!process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID;
 if (typeof window !== "undefined" && isFirebaseConfigured) {
   try {
     const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-    db = getFirestore(app);
-    console.log("🔥 Firebase initialized successfully.");
+    db = initializeFirestore(app, {
+      experimentalForceLongPolling: true,
+    });
+    console.log("🔥 Firebase initialized successfully (Long Polling forced).");
   } catch (error) {
     console.error("❌ Failed to initialize Firebase:", error);
   }
