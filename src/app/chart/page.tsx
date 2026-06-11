@@ -4,12 +4,18 @@ import React, { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { 
   ArrowLeft, Play, Pause, Award, Sparkles, Heart, CreditCard, 
-  Volume2, VolumeX, SkipBack, SkipForward, Activity 
+  Volume2, VolumeX, SkipBack, SkipForward, Activity, Star, 
+  MessageSquare, Send, ShieldCheck, Loader2, CheckCircle2, 
+  ChevronRight, AlertCircle
 } from "lucide-react";
 import { translations, type Lang } from "../translations";
-import { getLeaderboard, Song } from "../db";
+import { 
+  getLeaderboard, Song, purchaseSong, likeSong, 
+  getParentWallet, topUpParentWallet, addReview, 
+  getReviewsBySong, Review 
+} from "../db";
 import { db as firestoreDb } from "../firebase";
-import { collection, onSnapshot } from "firebase/firestore";
+import { collection, onSnapshot, doc, query, where } from "firebase/firestore";
 
 export default function BillboardChart() {
   const [lang, setLang] = useState<Lang>("KOR");
@@ -26,23 +32,51 @@ export default function BillboardChart() {
   // Simulated visualizer heights when playing
   const [visHeights, setVisHeights] = useState<number[]>(new Array(15).fill(4));
 
+  // Reviews state
+  const [reviews, setReviews] = useState<Review[]>([]);
+  const [ratingInput, setRatingInput] = useState<number>(5);
+  const [commentInput, setCommentInput] = useState<string>("");
+  const [authorInput, setAuthorInput] = useState<string>("");
+
+  // Wallet and recharge state
+  const [walletBalance, setWalletBalance] = useState<number>(150);
+  const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
+  const [paymentStep, setPaymentStep] = useState<number>(1);
+  const [paymentStatus, setPaymentStatus] = useState<"verifying" | "securing" | "recharging" | "idle">("idle");
+  const [selectedAmount, setSelectedAmount] = useState<number>(100);
+  const [selectedPrice, setSelectedPrice] = useState<string>("9,000 KRW");
+  
+  // Credit card inputs
+  const [cardNumber, setCardNumber] = useState("");
+  const [expiryDate, setExpiryDate] = useState("");
+  const [cvv, setCvv] = useState("");
+  const [cardholderName, setCardholderName] = useState("");
+  const [cardBrand, setCardBrand] = useState<"visa" | "mastercard" | "korea" | "generic">("generic");
+
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [showConfetti, setShowConfetti] = useState(false);
+
   useEffect(() => {
     // Load initial language
     const savedLang = localStorage.getItem("kidzania_lang") as Lang;
     if (savedLang) setLang(savedLang);
 
-    // Initial leaderboard load
+    // Initial data load (leaderboard and wallet)
     const loadInitialData = async () => {
       const initialSongs = await getLeaderboard();
       setSongs(initialSongs);
       if (initialSongs.length > 0) {
         setSelectedSong(prev => prev ? (initialSongs.find(s => s.id === prev.id) || initialSongs[0]) : initialSongs[0]);
       }
+      
+      const bal = await getParentWallet();
+      setWalletBalance(bal);
     };
     loadInitialData();
 
     // Setup real-time listener if Firebase is configured
     let unsubscribe: any;
+    let unsubscribeWallet: any;
     if (firestoreDb) {
       unsubscribe = onSnapshot(collection(firestoreDb, "songs"), (snapshot) => {
         const latestSongs = snapshot.docs.map(doc => doc.data() as Song);
@@ -54,6 +88,13 @@ export default function BillboardChart() {
         });
         setSongs(latestSongs);
       });
+
+      // Wallet listener
+      unsubscribeWallet = onSnapshot(doc(firestoreDb, "metadata", "parentWallet"), (docSnap) => {
+        if (docSnap.exists()) {
+          setWalletBalance(docSnap.data().balance);
+        }
+      });
     }
 
     // Sync state on local storage events
@@ -63,12 +104,16 @@ export default function BillboardChart() {
 
       const latestSongs = await getLeaderboard();
       setSongs(latestSongs);
+      
+      const bal = await getParentWallet();
+      setWalletBalance(bal);
     };
 
     window.addEventListener("storage", handleStorageChange);
     return () => {
       window.removeEventListener("storage", handleStorageChange);
       if (unsubscribe) unsubscribe();
+      if (unsubscribeWallet) unsubscribeWallet();
     };
   }, []);
 
@@ -81,6 +126,35 @@ export default function BillboardChart() {
       }
     }
   }, [songs]);
+
+  // Load reviews when selectedSong changes
+  useEffect(() => {
+    if (!selectedSong) {
+      setReviews([]);
+      return;
+    }
+    
+    const fetchReviews = async () => {
+      const list = await getReviewsBySong(selectedSong.id);
+      setReviews(list);
+    };
+    fetchReviews();
+
+    // Set up real-time listener for reviews if firestoreDb exists
+    let unsubscribeReviews: any;
+    if (firestoreDb) {
+      const reviewsRef = collection(firestoreDb, "reviews");
+      const q = query(reviewsRef, where("songId", "==", selectedSong.id));
+      unsubscribeReviews = onSnapshot(q, (snap) => {
+        const list = snap.docs.map((doc) => doc.data() as Review);
+        setReviews(list.sort((a, b) => b.registeredAt.localeCompare(a.registeredAt)));
+      });
+    }
+
+    return () => {
+      if (unsubscribeReviews) unsubscribeReviews();
+    };
+  }, [selectedSong?.id]);
 
   // Audio Play Effect
   useEffect(() => {
@@ -178,8 +252,135 @@ export default function BillboardChart() {
     window.dispatchEvent(new Event("storage"));
   };
 
+  const handleCardNumberChange = (value: string) => {
+    const clean = value.replace(/\D/g, "").substring(0, 16);
+    let formatted = "";
+    for (let i = 0; i < clean.length; i++) {
+      if (i > 0 && i % 4 === 0) formatted += " ";
+      formatted += clean[i];
+    }
+    setCardNumber(formatted);
+
+    // Detect brand
+    if (clean.startsWith("4")) setCardBrand("visa");
+    else if (clean.startsWith("5")) setCardBrand("mastercard");
+    else if (clean.startsWith("9")) setCardBrand("korea");
+    else setCardBrand("generic");
+  };
+
+  const handleExpiryChange = (value: string) => {
+    const clean = value.replace(/\D/g, "").substring(0, 4);
+    if (clean.length >= 3) {
+      setExpiryDate(clean.substring(0, 2) + "/" + clean.substring(2, 4));
+    } else {
+      setExpiryDate(clean);
+    }
+  };
+
+  const handleCvvChange = (value: string) => {
+    const clean = value.replace(/\D/g, "").substring(0, 3);
+    setCvv(clean);
+  };
+
+  const handleRechargePayment = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanCard = cardNumber.replace(/\s/g, "");
+    const cleanExpiry = expiryDate.replace(/\//g, "");
+
+    if (cleanCard.length < 16 || cleanExpiry.length < 4 || cvv.length < 3 || !cardholderName.trim()) {
+      setToastMessage(lang === "KOR" ? "⚠️ 올바른 카드 정보를 입력해 주세요." : "⚠️ Please enter valid card details.");
+      setTimeout(() => setToastMessage(null), 3000);
+      return;
+    }
+
+    setPaymentStep(2);
+    setPaymentStatus("verifying");
+
+    // Stage 1: Card validation
+    setTimeout(() => {
+      setPaymentStatus("securing");
+      // Stage 2: Gateway security
+      setTimeout(() => {
+        setPaymentStatus("recharging");
+        // Stage 3: Adding KidZos
+        setTimeout(async () => {
+          const newBalance = await topUpParentWallet(selectedAmount);
+          setWalletBalance(newBalance);
+          setPaymentStep(3);
+        }, 1200);
+      }, 1200);
+    }, 1000);
+  };
+
+  const handleSubmitReview = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedSong) return;
+    if (!commentInput.trim()) return;
+
+    await addReview(selectedSong.id, ratingInput, commentInput, authorInput);
+    
+    // Reset form
+    setCommentInput("");
+    setAuthorInput("");
+    setRatingInput(5);
+
+    setToastMessage(lang === "KOR" ? "⭐ 후기가 성공적으로 등록되었습니다!" : "⭐ Review submitted successfully!");
+    setTimeout(() => setToastMessage(null), 3000);
+  };
+
+  const handleLike = async () => {
+    if (!selectedSong) return;
+    await likeSong(selectedSong.id);
+    setToastMessage(lang === "KOR" ? "❤️ 응원의 좋아요를 보냈습니다!" : "❤️ Like sent successfully!");
+    setTimeout(() => setToastMessage(null), 3000);
+  };
+
+  const handleSponsor = async () => {
+    if (!selectedSong) return;
+    
+    if (walletBalance < 10) {
+      setToastMessage(lang === "KOR" ? "⚠️ 키조가 부족합니다! 충전 후 이용해 주세요." : "⚠️ Insufficient KidZos! Please recharge.");
+      setTimeout(() => setToastMessage(null), 3000);
+      return;
+    }
+
+    const res = await purchaseSong(selectedSong.id);
+    if (res.success) {
+      const newBal = await getParentWallet();
+      setWalletBalance(newBal);
+      setShowConfetti(true);
+      setToastMessage(lang === "KOR" ? "🎁 10 키조를 후원했습니다! 어린이가 기뻐할 거예요." : "🎁 Sponsored 10 KidZos! The child will be thrilled.");
+      setTimeout(() => {
+        setToastMessage(null);
+        setShowConfetti(false);
+      }, 4000);
+    } else {
+      setToastMessage(lang === "KOR" ? "⚠️ 후원에 실패했습니다." : "⚠️ Sponsorship failed.");
+      setTimeout(() => setToastMessage(null), 3000);
+    }
+  };
+
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-800 relative overflow-hidden">
+      {/* Toast Notification HUD */}
+      {toastMessage && (
+        <div className="fixed top-6 left-1/2 transform -translate-x-1/2 z-50 bg-white border-2 border-yellow-500 text-slate-900 px-6 py-3.5 rounded-2xl shadow-2xl flex items-center gap-2.5 font-bold animate-ticket">
+          <span className="text-yellow-500">✨</span>
+          <p className="text-xs sm:text-sm">{toastMessage}</p>
+        </div>
+      )}
+
+      {/* Confetti Animation Effect (if active) */}
+      {showConfetti && (
+        <div className="confetti-canvas fixed inset-0 z-50 flex items-center justify-center pointer-events-none bg-black/20">
+          <div className="text-center space-y-4 animate-float">
+            <span className="text-8xl">🎉</span>
+            <h2 className="text-3xl font-black text-yellow-400 text-glow-yellow">THANK YOU!</h2>
+            <p className="text-white text-lg font-bold">10 KidZos Sponsored to the Kid Producer!</p>
+          </div>
+        </div>
+      )}
+
       {/* Background Decorative Rings */}
       <div className="absolute -top-40 -left-40 w-96 h-96 rounded-full bg-[#e63946]/5 blur-3xl pointer-events-none" />
       <div className="absolute -bottom-40 -right-40 w-96 h-96 rounded-full bg-[#ffb703]/5 blur-3xl pointer-events-none" />
@@ -211,8 +412,23 @@ export default function BillboardChart() {
         </Link>
 
         <div className="flex items-center gap-3">
+          {/* Parent Wallet HUD */}
+          <div className="flex items-center gap-2 bg-blue-50 border border-blue-200 px-3.5 py-1.5 rounded-xl text-xs font-black text-blue-700 shadow-sm">
+            <CreditCard className="w-4 h-4 text-blue-600" />
+            <span>{t("parentWallet")}: {walletBalance} KidZos</span>
+            <button
+              onClick={() => {
+                setPaymentStep(1);
+                setIsPaymentModalOpen(true);
+              }}
+              className="ml-1.5 px-2 py-0.5 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-[9px] font-extrabold uppercase transition-colors cursor-pointer"
+            >
+              {lang === "KOR" ? "충전" : "Charge"}
+            </button>
+          </div>
+
           {/* Header Title Badge */}
-          <div className="bg-blue-50 border border-blue-200 px-3 py-1 rounded-full text-xs font-black text-blue-700 flex items-center gap-2 shadow-sm">
+          <div className="hidden sm:flex bg-blue-50 border border-blue-200 px-3 py-1 rounded-full text-xs font-black text-blue-700 items-center gap-2 shadow-sm">
             <Award className="w-4 h-4 text-yellow-650" />
             <span>{t("musicChart")}</span>
           </div>
@@ -447,6 +663,27 @@ export default function BillboardChart() {
                     </p>
                   </div>
 
+                  {/* Interactive Sponsor & Like Action Row */}
+                  <div className="grid grid-cols-2 gap-3 px-2">
+                    {/* Like Button */}
+                    <button
+                      onClick={handleLike}
+                      className="py-2.5 px-4 rounded-xl border border-red-200 hover:border-red-300 bg-red-50/20 hover:bg-red-50/50 text-red-600 hover:text-red-700 text-xs font-black flex items-center justify-center gap-1.5 cursor-pointer shadow-sm transition-all hover:scale-[1.01]"
+                    >
+                      <Heart className="w-4 h-4 fill-red-500/20 text-red-650" />
+                      <span>{lang === "KOR" ? `좋아요 (${selectedSong.likes})` : `Like (${selectedSong.likes})`}</span>
+                    </button>
+
+                    {/* Sponsor 10 KidZos Button */}
+                    <button
+                      onClick={handleSponsor}
+                      className="py-2.5 px-4 rounded-xl border border-yellow-200 hover:border-yellow-300 bg-amber-50/20 hover:bg-amber-50/50 text-amber-700 hover:text-amber-800 text-xs font-black flex items-center justify-center gap-1.5 cursor-pointer shadow-sm transition-all hover:scale-[1.01]"
+                    >
+                      <CreditCard className="w-4 h-4 text-amber-600" />
+                      <span>{lang === "KOR" ? "10 키조 후원" : "Sponsor 10"}</span>
+                    </button>
+                  </div>
+
                   {/* Seek Bar & Time */}
                   <div className="space-y-2">
                     <div className="flex items-center gap-3">
@@ -532,6 +769,110 @@ export default function BillboardChart() {
                     </div>
                   </div>
 
+                  {/* Reviews & Star Evaluation Panel */}
+                  <div className="border-t border-slate-200 pt-5 space-y-4 text-left">
+                    <div className="flex justify-between items-center">
+                      <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest block">
+                        {lang === "KOR" ? "⭐ 평가 및 후기" : "⭐ Ratings & Reviews"}
+                      </span>
+                      {reviews.length > 0 && (
+                        <span className="text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-md">
+                          ★ {(reviews.reduce((acc, r) => acc + r.rating, 0) / reviews.length).toFixed(1)} ({reviews.length})
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Write Review Form */}
+                    <form onSubmit={handleSubmitReview} className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-black text-slate-500">
+                          {lang === "KOR" ? "별점 선택" : "Select Star Rating"}
+                        </span>
+                        {/* 5-star interactive input */}
+                        <div className="flex items-center gap-1">
+                          {[1, 2, 3, 4, 5].map((star) => (
+                            <button
+                              type="button"
+                              key={star}
+                              onClick={() => setRatingInput(star)}
+                              className="focus:outline-none cursor-pointer"
+                            >
+                              <Star
+                                className={`w-4 h-4 transition-all ${
+                                  star <= ratingInput
+                                    ? "text-yellow-500 fill-yellow-500"
+                                    : "text-slate-300 hover:text-slate-450"
+                                }`}
+                              />
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Nickname & Comment Inputs */}
+                      <div className="space-y-2">
+                        <input
+                          type="text"
+                          placeholder={lang === "KOR" ? "닉네임 (작성 안할 시 익명)" : "Nickname (Optional)"}
+                          value={authorInput}
+                          onChange={(e) => setAuthorInput(e.target.value)}
+                          className="w-full bg-white border border-slate-250 rounded-xl p-2 text-xs font-semibold text-slate-700 focus:outline-none focus:border-yellow-500"
+                        />
+                        <textarea
+                          placeholder={lang === "KOR" ? "어린이 프로듀서에게 따뜻한 한마디 후기를 남겨주세요!" : "Leave a warm feedback for the kid producer!"}
+                          value={commentInput}
+                          onChange={(e) => setCommentInput(e.target.value)}
+                          required
+                          rows={2}
+                          className="w-full bg-white border border-slate-250 rounded-xl p-2 text-xs font-semibold text-slate-700 focus:outline-none focus:border-yellow-500 resize-none"
+                        />
+                      </div>
+
+                      <button
+                        type="submit"
+                        className="w-full py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-black flex items-center justify-center gap-1 cursor-pointer transition-all hover:scale-[1.01]"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                        <span>{lang === "KOR" ? "후기 등록하기" : "Submit Review"}</span>
+                      </button>
+                    </form>
+
+                    {/* Reviews List */}
+                    <div className="space-y-2.5 max-h-48 overflow-y-auto pr-1 scrollbar-thin">
+                      {reviews.length > 0 ? (
+                        reviews.map((rev) => (
+                          <div key={rev.id} className="bg-white border border-slate-100 rounded-xl p-3 space-y-1 shadow-sm">
+                            <div className="flex justify-between items-center">
+                              <span className="text-[10px] font-black text-slate-700 truncate max-w-[120px]">
+                                {rev.authorName}
+                              </span>
+                              <div className="flex items-center gap-0.5 shrink-0">
+                                {Array.from({ length: 5 }).map((_, idx) => (
+                                  <Star
+                                    key={idx}
+                                    className={`w-3 h-3 ${
+                                      idx < rev.rating ? "text-yellow-500 fill-yellow-500" : "text-slate-200"
+                                    }`}
+                                  />
+                                ))}
+                              </div>
+                            </div>
+                            <p className="text-xs text-slate-600 font-semibold leading-normal font-sans text-left">
+                              {rev.comment}
+                            </p>
+                            <span className="text-[9px] font-mono text-slate-400 block text-right">
+                              {rev.registeredAt}
+                            </span>
+                          </div>
+                        ))
+                      ) : (
+                        <p className="text-center py-6 text-slate-400 font-bold italic text-xs">
+                          {lang === "KOR" ? "💬 첫 번째 별점 후기를 남겨주세요!" : "💬 Be the first to leave a feedback!"}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
                 </div>
               ) : (
                 <div className="py-20 text-center text-slate-500 font-semibold text-sm border border-dashed border-slate-200 rounded-2xl bg-slate-50">
@@ -552,6 +893,256 @@ export default function BillboardChart() {
           © 2026 KidZania Pop Music Studio. All rights reserved.
         </p>
       </footer>
+
+      {/* Interactive Credit Card Charge Modal */}
+      {isPaymentModalOpen && (
+        <div className="no-print fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-3xl max-w-4xl w-full p-6 sm:p-8 space-y-6 shadow-2xl border border-slate-200 relative animate-ticket max-h-[90vh] overflow-y-auto">
+            
+            {/* Close Button */}
+            <button 
+              onClick={() => setIsPaymentModalOpen(false)}
+              className="absolute top-4 right-4 p-2 text-slate-400 hover:text-slate-700 rounded-full transition-colors cursor-pointer text-lg font-black"
+            >
+              ✕
+            </button>
+
+            <div className="space-y-1 text-left">
+              <h3 className="text-2xl font-black text-slate-900">{t("modalRechargeTitle")}</h3>
+              <p className="text-xs sm:text-sm text-slate-500 font-semibold leading-relaxed">
+                {t("selectRechargeAmount")}
+              </p>
+            </div>
+
+            {paymentStep === 1 && (
+              <form onSubmit={handleRechargePayment} className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+                
+                {/* Left Column: Form Controls */}
+                <div className="space-y-6">
+                  {/* Select recharge items */}
+                  <div className="space-y-2.5 text-left">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">
+                      RECHARGE PACKAGES
+                    </label>
+                    
+                    <div className="grid grid-cols-3 gap-3">
+                      {[
+                        { amount: 50, price: "5,000 KRW", badge: "Basic" },
+                        { amount: 100, price: "9,000 KRW", badge: "Popular" },
+                        { amount: 200, price: "16,000 KRW", badge: "Best" }
+                      ].map((pkg) => (
+                        <button
+                          type="button"
+                          key={pkg.amount}
+                          onClick={() => {
+                            setSelectedAmount(pkg.amount);
+                            setSelectedPrice(pkg.price);
+                          }}
+                          className={`p-4 rounded-2xl flex flex-col items-center justify-between text-center border-2 transition-all relative cursor-pointer ${
+                            selectedAmount === pkg.amount
+                              ? "border-blue-600 bg-blue-50/20 shadow-md scale-[1.02] font-black"
+                              : "border-slate-200 hover:border-slate-300 hover:bg-slate-50/50"
+                          }`}
+                        >
+                          <span className="absolute -top-2 -right-1 px-1.5 py-0.5 text-[8px] font-extrabold rounded-md uppercase tracking-wider bg-slate-900 text-white">
+                            {pkg.badge}
+                          </span>
+                          <span className="text-xs font-semibold text-slate-500 mt-2">KidZos</span>
+                          <strong className="text-xl font-black text-slate-900 leading-tight">+{pkg.amount}</strong>
+                          <span className="text-[10px] font-bold text-slate-400 mt-1">{pkg.price}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Credit Card Inputs */}
+                  <div className="space-y-4 text-left">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block border-b border-slate-100 pb-1.5">
+                      {t("cardDetails")}
+                    </label>
+
+                    {/* Card Number */}
+                    <div className="space-y-1">
+                      <span className="text-[10px] font-black text-slate-505">{t("cardNumber")}</span>
+                      <input
+                        type="text"
+                        required
+                        placeholder="xxxx xxxx xxxx xxxx"
+                        value={cardNumber}
+                        onChange={(e) => handleCardNumberChange(e.target.value)}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs sm:text-sm font-bold text-slate-800 focus:outline-none focus:border-blue-500 focus:bg-white transition-all"
+                      />
+                    </div>
+
+                    {/* Expiry and CVV inline */}
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-1">
+                        <span className="text-[10px] font-black text-slate-505">{t("cardExpiry")}</span>
+                        <input
+                          type="text"
+                          required
+                          placeholder="MM/YY"
+                          value={expiryDate}
+                          onChange={(e) => handleExpiryChange(e.target.value)}
+                          className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs sm:text-sm font-bold text-slate-800 focus:outline-none focus:border-blue-500 focus:bg-white transition-all text-center"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <span className="text-[10px] font-black text-slate-550">{t("cardCvv")}</span>
+                        <input
+                          type="password"
+                          required
+                          placeholder="***"
+                          value={cvv}
+                          onChange={(e) => handleCvvChange(e.target.value)}
+                          className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs sm:text-sm font-bold text-slate-800 focus:outline-none focus:border-blue-500 focus:bg-white transition-all text-center"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Cardholder Name */}
+                    <div className="space-y-1">
+                      <span className="text-[10px] font-black text-slate-505">{t("cardHolder")}</span>
+                      <input
+                        type="text"
+                        required
+                        placeholder="KIDZANIA TRAINEE"
+                        value={cardholderName}
+                        onChange={(e) => setCardholderName(e.target.value)}
+                        className="w-full bg-slate-55 border border-slate-200 rounded-xl p-3 text-xs sm:text-sm font-bold text-slate-800 focus:outline-none focus:border-blue-500 focus:bg-white transition-all"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="w-full py-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs sm:text-sm font-black flex items-center justify-center gap-1.5 cursor-pointer shadow-lg shadow-blue-500/20 transition-all hover:scale-[1.01] mt-2"
+                  >
+                    <ShieldCheck className="w-4.5 h-4.5" />
+                    <span>{t("btnPay")}</span>
+                  </button>
+
+                </div>
+
+                {/* Right Column: Interactive Card Preview */}
+                <div className="flex flex-col justify-center items-center bg-slate-50 rounded-3xl p-6 border border-slate-100 space-y-6">
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">
+                    CARD PREVIEW
+                  </span>
+                  
+                  {/* Visual Credit Card */}
+                  <div 
+                    className={`w-full max-w-[320px] h-48 rounded-2xl relative p-6 text-white flex flex-col justify-between overflow-hidden shadow-2xl border border-white/10 select-none bg-gradient-to-br transition-all duration-500 ${
+                      cardBrand === "visa" 
+                        ? "from-blue-600 to-indigo-800 shadow-blue-500/20" 
+                        : cardBrand === "mastercard" 
+                        ? "from-red-600 to-amber-700 shadow-red-500/20" 
+                        : cardBrand === "korea" 
+                        ? "from-rose-600 to-blue-700 shadow-rose-500/20" 
+                        : "from-slate-800 to-slate-950 shadow-slate-900/30"
+                    }`}
+                  >
+                    {/* Card layout lines */}
+                    <div className="absolute top-0 right-0 w-24 h-24 bg-white/5 rounded-full blur-2xl pointer-events-none" />
+                    <div className="absolute -bottom-8 -left-8 w-32 h-32 bg-white/5 rounded-full blur-xl pointer-events-none" />
+
+                    {/* Top Row: Chip and Brand */}
+                    <div className="flex justify-between items-start">
+                      {/* Gold Chip */}
+                      <div className="w-10 h-7 rounded bg-gradient-to-br from-amber-300 to-yellow-500 border border-amber-400/30 relative overflow-hidden flex flex-col justify-around p-1 shadow-inner">
+                        <div className="h-0.5 bg-black/10 w-full" />
+                        <div className="h-0.5 bg-black/10 w-full" />
+                        <div className="h-0.5 bg-black/10 w-full" />
+                      </div>
+                      {/* Brand label */}
+                      <span className="text-xs font-black italic tracking-widest uppercase bg-white/10 px-2.5 py-1 rounded">
+                        {cardBrand === "visa" && "VISA"}
+                        {cardBrand === "mastercard" && "Mastercard"}
+                        {cardBrand === "korea" && "KOREA CARD"}
+                        {cardBrand === "generic" && "CREDIT CARD"}
+                      </span>
+                    </div>
+
+                    {/* Card Number */}
+                    <div className="text-base sm:text-lg font-mono tracking-widest font-bold my-2 drop-shadow-md text-left">
+                      {cardNumber || "•••• •••• •••• ••••"}
+                    </div>
+
+                    {/* Cardholder name and Expiry */}
+                    <div className="flex justify-between items-end">
+                      <div className="min-w-0 text-left">
+                        <span className="text-[7px] text-white/50 block font-mono font-black uppercase tracking-wider leading-none">Card Holder</span>
+                        <span className="text-[10px] font-bold font-mono tracking-wide truncate block mt-1 uppercase">
+                          {cardholderName || "CARDHOLDER NAME"}
+                        </span>
+                      </div>
+                      <div className="text-right">
+                        <span className="text-[7px] text-white/50 block font-mono font-black uppercase tracking-wider leading-none">Expires</span>
+                        <span className="text-[10px] font-bold font-mono tracking-wider block mt-1">
+                          {expiryDate || "MM/YY"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 text-[10px] text-slate-400 font-bold">
+                    <span className="text-blue-500">🔒</span>
+                    <span>256-bit SSL Secure Transaction & local encryption</span>
+                  </div>
+
+                </div>
+
+              </form>
+            )}
+
+            {/* Payment Processing loading screen */}
+            {paymentStep === 2 && (
+              <div className="py-16 flex flex-col items-center justify-center text-center space-y-6 animate-ticket">
+                <Loader2 className="w-12 h-12 text-blue-600 animate-spin" />
+                <div className="space-y-2">
+                  <h4 className="text-base font-black text-slate-900">
+                    {paymentStatus === "verifying" && (lang === "KOR" ? "카드 번호 검증 중..." : "Verifying Card Number...")}
+                    {paymentStatus === "securing" && (lang === "KOR" ? "결제 게이트웨이 보안 연결 중..." : "Securing Connection...")}
+                    {paymentStatus === "recharging" && (lang === "KOR" ? "지갑에 키조 충전 요청 중..." : "Recharging KidZos...")}
+                  </h4>
+                  <p className="text-xs text-slate-400 font-semibold">
+                    {lang === "KOR" ? "창을 닫지 마세요. 결제가 진행 중입니다." : "Do not close this window. Transaction in progress."}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Success step screen */}
+            {paymentStep === 3 && (
+              <div className="py-12 flex flex-col items-center justify-center text-center space-y-6 animate-ticket">
+                <div className="w-16 h-16 rounded-full bg-emerald-50 border-2 border-emerald-500 flex items-center justify-center text-emerald-500">
+                  <CheckCircle2 className="w-10 h-10" />
+                </div>
+                
+                <div className="space-y-2">
+                  <h4 className="text-xl font-black text-slate-900">
+                    {lang === "KOR" ? "충전이 완료되었습니다!" : "Recharge Complete!"}
+                  </h4>
+                  <p className="text-xs text-slate-500 font-bold max-w-sm">
+                    {lang === "KOR" 
+                      ? `성공적으로 결제되었습니다. ${selectedAmount} 키조가 충전되어 총 ${walletBalance} 키조가 되었습니다.` 
+                      : `Payment processed. ${selectedAmount} KidZos added. Total balance is now ${walletBalance} KidZos.`
+                    }
+                  </p>
+                </div>
+
+                <button
+                  onClick={() => setIsPaymentModalOpen(false)}
+                  className="px-6 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-black cursor-pointer shadow-md transition-colors"
+                >
+                  {lang === "KOR" ? "차트로 돌아가기" : "Return to Chart"}
+                </button>
+              </div>
+            )}
+
+          </div>
+        </div>
+      )}
     </div>
   );
 }

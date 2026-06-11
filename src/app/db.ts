@@ -33,10 +33,20 @@ export interface Song {
   registeredAt: string;
 }
 
+export interface Review {
+  id: string;
+  songId: string;
+  rating: number; // 1 to 5
+  comment: string;
+  authorName: string;
+  registeredAt: string;
+}
+
 export interface DatabaseState {
   children: Child[];
   songs: Song[];
   parentWallet: number;
+  reviews?: Review[];
 }
 
 const DEFAULT_SONGS: Song[] = [
@@ -104,22 +114,25 @@ const DEFAULT_SONGS: Song[] = [
 
 export const getDb = (): DatabaseState => {
   if (typeof window === "undefined") {
-    return { children: [], songs: DEFAULT_SONGS, parentWallet: 150 };
+    return { children: [], songs: DEFAULT_SONGS, parentWallet: 150, reviews: [] };
   }
   const data = localStorage.getItem("kidzania_music_db");
   if (!data) {
     const initialState = {
       children: [],
       songs: DEFAULT_SONGS,
-      parentWallet: 150
+      parentWallet: 150,
+      reviews: []
     };
     localStorage.setItem("kidzania_music_db", JSON.stringify(initialState));
     return initialState;
   }
   try {
-    return JSON.parse(data);
+    const parsed = JSON.parse(data);
+    if (!parsed.reviews) parsed.reviews = [];
+    return parsed;
   } catch (e) {
-    return { children: [], songs: DEFAULT_SONGS, parentWallet: 150 };
+    return { children: [], songs: DEFAULT_SONGS, parentWallet: 150, reviews: [] };
   }
 };
 
@@ -393,4 +406,59 @@ export const getLeaderboard = async (): Promise<Song[]> => {
     const scoreB = (b.purchases * 100) + (b.likes * 10) + b.score;
     return scoreB - scoreA;
   });
+};
+
+export const addReview = async (
+  songId: string,
+  rating: number,
+  comment: string,
+  authorName: string
+): Promise<Review> => {
+  const newReview: Review = {
+    id: "rev-" + Math.floor(100000 + Math.random() * 900000),
+    songId,
+    rating,
+    comment: comment.trim(),
+    authorName: authorName.trim() || "익명 보호자 (Anonymous Parent)",
+    registeredAt: new Date().toISOString().split("T")[0]
+  };
+
+  if (firestoreDb) {
+    try {
+      const reviewDocRef = doc(firestoreDb, "reviews", newReview.id);
+      await setDoc(reviewDocRef, newReview);
+      return newReview;
+    } catch (e) {
+      console.error("Firestore addReview failed, falling back to local:", e);
+    }
+  }
+
+  // LocalStorage Fallback
+  const db = getDb();
+  if (!db.reviews) {
+    db.reviews = [];
+  }
+  db.reviews.push(newReview);
+  saveDb(db);
+  return newReview;
+};
+
+export const getReviewsBySong = async (songId: string): Promise<Review[]> => {
+  if (firestoreDb) {
+    try {
+      const reviewsRef = collection(firestoreDb, "reviews");
+      const q = query(reviewsRef, where("songId", "==", songId));
+      const snap = await getDocs(q);
+      const list = snap.docs.map((doc) => doc.data() as Review);
+      return list.sort((a, b) => b.registeredAt.localeCompare(a.registeredAt));
+    } catch (e) {
+      console.error("Firestore getReviewsBySong failed, falling back to local:", e);
+    }
+  }
+
+  const db = getDb();
+  const list = db.reviews || [];
+  return list
+    .filter((r) => r.songId === songId)
+    .sort((a, b) => b.registeredAt.localeCompare(a.registeredAt));
 };
